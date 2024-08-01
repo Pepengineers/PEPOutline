@@ -1,0 +1,72 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CutoutPassCS
+
+#ifndef TILE_SIZE
+#define TILE_SIZE 8
+#endif
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+
+TYPED_TEXTURE2D(float, _CustomDepthTexture);
+TYPED_TEXTURE2D(float, _DepthTexture);
+TYPED_TEXTURE2D(uint2, _Stencil);
+RW_TEXTURE2D(float4, _ResultTexture);
+RW_TEXTURE2D(uint, _Mask);
+
+groupshared uint PixelHasStencilValue[4];
+
+[numthreads(TILE_SIZE,TILE_SIZE,1)]
+void CutoutPassCS(
+    uint3 Gid : SV_GroupID,
+    uint3 DTid : SV_DispatchThreadID,
+    uint3 GTid : SV_GroupThreadID,
+    uint GI : SV_GroupIndex)
+{
+    float4 CutoutVal = float4(0, 0, 0, 0);
+
+    UNITY_BRANCH
+    if (GI < 4)
+    {
+        PixelHasStencilValue[GI] = 0;
+    }
+
+    const uint2 TileIdx = Gid.xy;
+    const uint2 Pos = TileIdx * (TILE_SIZE - 1) + GTid.xy;
+    const uint Stencil = GetStencilValue(_Stencil.Load(uint3(Pos, 0)).xy);
+    const uint EnableBit = (Stencil >> 0) & 1;
+    const int2 TileOffset = int2(GI % 3, GI / 3) - int2(1, 1);
+
+    UNITY_BRANCH
+    if (EnableBit)
+    {
+        const float CustomDepthValue = LOAD_TEXTURE2D(_CustomDepthTexture, Pos);
+        CutoutVal.r = Stencil;
+        CutoutVal.g = CustomDepthValue;
+        CutoutVal.a = 1;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    _ResultTexture[Pos] = CutoutVal;
+
+    uint StencilIdx = (EnableBit << 1) + Stencil > 1;
+    PixelHasStencilValue[StencilIdx] = 1;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    UNITY_BRANCH
+    if (GI >= 9)
+    {
+        return;
+    }
+
+    const uint StencilDiffersMarker = PixelHasStencilValue[0] + PixelHasStencilValue[1] + PixelHasStencilValue[2] + PixelHasStencilValue[3];
+
+    UNITY_BRANCH
+    if (StencilDiffersMarker > 1)
+    {
+        _Mask[TileIdx + TileOffset] = 1;
+    }
+}
